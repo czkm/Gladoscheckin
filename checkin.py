@@ -1,97 +1,129 @@
 import requests
 import json
 import os
-
+from typing import Optional
 from pypushdeer import PushDeer
 
-# -------------------------------------------------------------------------------------------
-# github workflows
-# -------------------------------------------------------------------------------------------
-if __name__ == '__main__':
-    # pushdeer key 申请地址 https://www.pushdeer.com/product.html
-    sckey = os.environ.get("SENDKEY", "")
+def send_pushdeer_notification(sckey: str, title: str, content: str) -> None:
+    """发送 PushDeer 通知"""
+    if not sckey:
+        print("未提供 PushDeer SENDKEY，跳过通知")
+        return
+    try:
+        pushdeer = PushDeer(pushkey=sckey)
+        pushdeer.send_text(title, desp=content)
+        print("PushDeer 通知发送成功")
+    except Exception as e:
+        print(f"PushDeer 通知发送失败: {e}")
 
-    # 推送内容
-    title = ""
-    success, fail, repeats = 0, 0, 0        # 成功账号数量 失败账号数量 重复签到账号数量
+def checkin_glados(cookie: str) -> Optional[dict]:
+    """执行 Glados 签到并获取状态"""
+    check_in_url = "https://glados.space/api/user/checkin"
+    status_url = "https://glados.space/api/user/status"
+    headers = {
+        'cookie': cookie,
+        'referer': 'https://glados.space/console/checkin',
+        'origin': 'https://glados.space',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36',
+        'content-type': 'application/json;charset=UTF-8'
+    }
+    payload = {'token': 'glados.one'}
+
+    try:
+        # 签到请求
+        checkin = requests.post(check_in_url, headers=headers, data=json.dumps(payload), timeout=10)
+        print(f"签到请求状态码: {checkin.status_code}")
+        print(f"签到请求响应: {checkin.text}")
+
+        # 状态请求
+        state = requests.get(status_url, headers=headers, timeout=10)
+        print(f"状态请求状态码: {state.status_code}")
+        print(f"状态请求响应: {state.text}")
+
+        # 检查签到响应
+        try:
+            checkin_data = checkin.json()
+        except json.JSONDecodeError:
+            print("签到API返回非JSON格式")
+            return {'email': 'Unknown', 'message': '签到API返回非JSON格式', 'points': 0, 'left_days': 'error'}
+
+        # 检查状态响应
+        try:
+            state_data = state.json()
+        except json.JSONDecodeError:
+            print("状态API返回非JSON格式")
+            return {'email': 'Unknown', 'message': '状态API返回非JSON格式', 'points': 0, 'left_days': 'error'}
+
+        # 验证响应结构
+        if 'data' not in state_data:
+            print(f"状态API未返回'data'键，完整响应: {state_data}")
+            return {'email': 'Unknown', 'message': f"状态API未返回'data'键: {state_data}", 'points': 0, 'left_days': 'error'}
+
+        # 提取数据
+        email = state_data['data'].get('email', 'Unknown')
+        left_days = state_data['data'].get('leftDays', '0')
+        try:
+            left_days = int(float(left_days)) if left_days else 0
+        except (ValueError, TypeError):
+            left_days = 'error'
+
+        message = checkin_data.get('message', '未知签到结果')
+        points = checkin_data.get('points', 0)
+
+        return {
+            'email': email,
+            'message': message,
+            'points': points,
+            'left_days': str(left_days)
+        }
+
+    except requests.RequestException as e:
+        print(f"请求失败: {e}")
+        return {'email': 'Unknown', 'message': f'请求失败: {e}', 'points': 0, 'left_days': 'error'}
+
+def main():
+    # 获取环境变量
+    sckey = os.environ.get("SENDKEY", "")
+    cookies = os.environ.get("COOKIES", "").split("&") if os.environ.get("COOKIES") else []
+
+    if not cookies or cookies == [""]:
+        print("未获取到COOKIES变量")
+        send_pushdeer_notification(sckey, "Glados 签到失败", "未找到 COOKIES!")
+        exit(1)
+
+    success, fail, repeats = 0, 0, 0
     context = ""
 
-    # glados账号cookie 直接使用数组 如果使用环境变量需要字符串分割一下
-    cookies = os.environ.get("COOKIES", []).split("&")
-    if cookies[0] != "":
+    for cookie in cookies:
+        if not cookie.strip():
+            print("跳过空cookie")
+            continue
 
-        check_in_url = "https://glados.space/api/user/checkin"        # 签到地址
-        status_url = "https://glados.space/api/user/status"          # 查看账户状态
+        result = checkin_glados(cookie)
+        email = result['email']
+        message = result['message']
+        points = result['points']
+        left_days = result['left_days']
 
-        referer = 'https://glados.space/console/checkin'
-        origin = "https://glados.space"
-        useragent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
-        payload = {
-            'token': 'glados.one'
-        }
-        
-        for cookie in cookies:
-            checkin = requests.post(check_in_url, headers={'cookie': cookie, 'referer': referer, 'origin': origin,
-                                    'user-agent': useragent, 'content-type': 'application/json;charset=UTF-8'}, data=json.dumps(payload))
-            state = requests.get(status_url, headers={
-                                'cookie': cookie, 'referer': referer, 'origin': origin, 'user-agent': useragent})
+        # 判断签到结果
+        if "Checkin! Got" in message:
+            success += 1
+            message_status = f"签到成功，会员点数 + {points}"
+        elif "Checkin Repeats!" in message:
+            repeats += 1
+            message_status = "重复签到，明天再来"
+        else:
+            fail += 1
+            message_status = f"签到失败: {message}"
 
-            message_status = ""
-            points = 0
-            message_days = ""
-            
-            
-            if checkin.status_code == 200:
-                # 解析返回的json数据
-                result = checkin.json()     
-                # 获取签到结果
-                check_result = result.get('message')
-                points = result.get('points')
+        log = f"账号: {email}, P: {points}, 剩余: {left_days} 天 | {message_status}"
+        print(log)
+        context += log + "\n"
 
-                # 获取账号当前状态
-                result = state.json()
-                # 获取剩余时间
-                leftdays = int(float(result['data']['leftDays']))
-                # 获取账号email
-                email = result['data']['email']
-                
-                print(check_result)
-                if "Checkin! Got" in check_result:
-                    success += 1
-                    message_status = "签到成功，会员点数 + " + str(points)
-                elif "Checkin Repeats!" in check_result:
-                    repeats += 1
-                    message_status = "重复签到，明天再来"
-                else:
-                    fail += 1
-                    message_status = "签到失败，请检查..."
+    # 发送通知
+    title = f"Glados, 成功{success}, 失败{fail}, 重复{repeats}"
+    print("推送内容:\n", context)
+    send_pushdeer_notification(sckey, title, context)
 
-                if leftdays is not None:
-                    message_days = f"{leftdays} 天"
-                else:
-                    message_days = "error"
-            else:
-                email = ""
-                message_status = "签到请求URL失败, 请检查..."
-                message_days = "error"
-
-            context += "账号: " + email + ", P: " + str(points) +", 剩余: " + message_days + " | "
-
-        # 推送内容 
-        title = f'Glados, 成功{success},失败{fail},重复{repeats}'
-        print("Send Content:" + "\n", context)
-        
-    else:
-        # 推送内容 
-        title = f'# 未找到 cookies!'
-
-    print("sckey:", sckey)
-    print("cookies:", cookies)
-    
-    # 推送消息
-    # 未设置 sckey 则不进行推送
-    if not sckey:
-        print("Not push")
-    else:
-        pushdeer = PushDeer(pushkey=sckey) 
-        pushdeer.send_text(title, desp=context)
+if __name__ == "__main__":
+    main()
